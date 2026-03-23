@@ -26,28 +26,29 @@ const TRANSLATED_CHUNKS_DIR = "translated-merged-chunks";
 const SECTION_SEPARATOR = "--------------------";
 const HEADER_SEPARATOR = "********************";
 
-// Original uses full-width ＃, translated uses half-width #.
-const isSpeechSourceJP = (line) => line.startsWith("＃");
-const isSpeechSourceEN = (line) => line.startsWith("$");
-
-// Original uses 「」 or （）, translated uses \u201C\u201D.
-const isSpeechContentJP = (line) =>
-  (line.startsWith("「") && line.endsWith("」")) ||
-  (line.startsWith("（") && line.endsWith("）"));
-const isSpeechContentEN = (line) =>
-  line.startsWith("\u201C") && line.endsWith("\u201D");
-
 /**
- * Classify a line into one of three structural types:
- *   "source"  — speaker name (＃ in original, # in translated)
- *   "speech"  — speech content (「…」/（…） in original, \u201C…\u201D in translated)
- *   "normal"  — narration / everything else
+ * Classify a line into a structural type with bracket-specific subtypes:
+ *   "source"         — speaker name (＃ in original, $ in translated)
+ *   "speech-quote"   — quoted speech (「」 / \u201C\u201D / "")
+ *   "speech-paren"   — thought/parenthetical (（） / ())
+ *   "speech-bracket" — emphasis (【】 / [])
+ *   "normal"         — narration / everything else
  */
 function lineType(line, isTranslated) {
-  if (isTranslated ? isSpeechSourceEN(line) : isSpeechSourceJP(line))
+  if (isTranslated ? line.startsWith("$") : line.startsWith("＃"))
     return "source";
-  if (isTranslated ? isSpeechContentEN(line) : isSpeechContentJP(line))
-    return "speech";
+
+  if (isTranslated) {
+    if (line.startsWith("\u201C") && line.endsWith("\u201D")) return "speech-quote";
+    if (line.startsWith('"') && line.endsWith('"')) return "speech-quote";
+    if (line.startsWith("(") && line.endsWith(")")) return "speech-paren";
+    if (line.startsWith("[") && line.endsWith("]")) return "speech-bracket";
+  } else {
+    if (line.startsWith("「") && line.endsWith("」")) return "speech-quote";
+    if (line.startsWith("（") && line.endsWith("）")) return "speech-paren";
+    if (line.startsWith("【") && line.endsWith("】")) return "speech-bracket";
+  }
+
   return "normal";
 }
 
@@ -100,15 +101,20 @@ async function parseSectionsFromChunks(dir) {
       if (i >= allLines.length || allLines[i] !== HEADER_SEPARATOR) continue;
       i++; // skip header separator
 
-      // Collect non-empty content lines until next separator or EOF.
+      // Collect non-empty content lines and their 1-indexed chunk line numbers.
       const contentLines = [];
+      const contentLineNos = [];
       while (i < allLines.length && allLines[i] !== SECTION_SEPARATOR) {
-        if (allLines[i].length > 0) contentLines.push(allLines[i]);
+        if (allLines[i].length > 0) {
+          contentLines.push(allLines[i]);
+          contentLineNos.push(i + 1);
+        }
         i++;
       }
 
       sections.set(fileName, {
         lines: contentLines,
+        lineNos: contentLineNos,
         chunkPath,
         startLine: sectionStartLine,
       });
@@ -129,7 +135,7 @@ async function main() {
 
   // Step 2: Validate each original section against its translated counterpart.
   for (const [fileName, origEntry] of origSections) {
-    const { lines: origLines, chunkPath: origChunk, startLine: origStart } = origEntry;
+    const { lines: origLines, lineNos: origLineNos, chunkPath: origChunk, startLine: origStart } = origEntry;
 
     // Step 2a: Check that the translated chunks have a matching section.
     if (!transSections.has(fileName)) {
@@ -143,8 +149,9 @@ async function main() {
 
     checked++;
     const transEntry = transSections.get(fileName);
-    const { lines: transLines, chunkPath: transChunk, startLine: transStart } = transEntry;
+    const { lines: transLines, lineNos: transLineNos, chunkPath: transChunk, startLine: transStart } = transEntry;
     const sectionErrors = [];
+    let firstErrorLineIdx = -1;
 
     if (origLines.length !== transLines.length) {
       // Step 2b: Non-empty line counts must match.
@@ -157,6 +164,7 @@ async function main() {
         const origType = lineType(origLines[i], false);
         const transType = lineType(transLines[i], true);
         if (origType !== transType) {
+          if (firstErrorLineIdx === -1) firstErrorLineIdx = i;
           sectionErrors.push(
             `First type mismatch at line ${i + 1} (${origType} vs. ${transType}):\n     original:   ${origLines[i]}\n     translated: ${transLines[i]}`,
           );
@@ -172,19 +180,23 @@ async function main() {
         const transType = lineType(transLine, true);
 
         if (origType !== transType) {
+          if (firstErrorLineIdx === -1) firstErrorLineIdx = i;
           sectionErrors.push(
             `Line ${i + 1}: type mismatch (${origType} vs. ${transType})\n     original:   ${origLine}\n     translated: ${transLine}`,
           );
+          break;
         } else if (origType === "source") {
           const origName = origLine.slice(1);
           const transName = transLine.slice(1);
           const expectedEN = SPEAKER_MAP.get(origName);
 
           if (!expectedEN) {
+            if (firstErrorLineIdx === -1) firstErrorLineIdx = i;
             sectionErrors.push(
               `Line ${i + 1}: unknown speaker "${origName}" — add to SPEAKER_MAP`,
             );
           } else if (transName !== expectedEN) {
+            if (firstErrorLineIdx === -1) firstErrorLineIdx = i;
             sectionErrors.push(
               `Line ${i + 1}: speaker name mismatch\n     expected: $${expectedEN}\n     got:      ${transLine}`,
             );
@@ -195,8 +207,12 @@ async function main() {
 
     if (sectionErrors.length > 0) {
       mismatched++;
+      const origErrLine = firstErrorLineIdx >= 0 && origLineNos[firstErrorLineIdx]
+        ? origLineNos[firstErrorLineIdx] : origStart;
+      const transErrLine = firstErrorLineIdx >= 0 && transLineNos[firstErrorLineIdx]
+        ? transLineNos[firstErrorLineIdx] : transStart;
       errors.push({
-        header: `✗  ${origChunk}:${origStart} | ${transChunk}:${transStart} > ${fileName}`,
+        header: `✗  ${origChunk}:${origErrLine} | ${transChunk}:${transErrLine} > ${fileName}`,
         details: sectionErrors.map((e) => `   ${e}`),
       });
     }

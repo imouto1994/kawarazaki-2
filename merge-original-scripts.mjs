@@ -1,8 +1,9 @@
 /**
  * Merge Original JSON Scripts
  *
- * Reads every JSON file in `original-json/`, converts each entry into
- * the canonical text format, and writes a single `merged-original.txt`.
+ * Reads every JSON file in `original-json/`, joins fragmented entries,
+ * converts each entry into the canonical text format, and writes a single
+ * `merged-original.txt`.
  *
  * Speech entries in kawarazaki-2 have no separate `name` field — the
  * speaker is inline in the `message`:
@@ -10,7 +11,15 @@
  *   ［{source}］：{content}          (dialogue)
  *   ［{source}］：（{content}）        (thought)
  *
- * These are split into two lines:
+ * Many lines are split across adjacent JSON entries. The script joins:
+ *   1. Lone bracket open: "［" + "］：content"  →  "［］：content"
+ *   2. Empty-content speech: "［speaker］：" + "content"  →  "［speaker］：content"
+ *   3. Lone punctuation: previous + "。"  →  "previous。"
+ *   4. Incomplete speech + continuation: "［speaker］：partial…" + "rest"
+ *      when the speech doesn't end with a sentence terminator and the
+ *      next entry is not a new speech line.
+ *
+ * After joining, speech lines become two lines:
  *
  *   ＃{source}
  *   {content}     — thoughts keep （）, dialogue is wrapped in 「」
@@ -31,8 +40,87 @@ const OUTPUT_FILE = "merged-original.txt";
 const SECTION_SEPARATOR = "--------------------";
 const HEADER_SEPARATOR = "********************";
 
-// Matches ［speaker］：content where content is the rest of the line.
-const SPEECH_RE = /^［(.+?)］：(.+)$/s;
+// Matches ［speaker］：content where speaker can be empty (anonymous protagonist).
+const SPEECH_RE = /^［(.*?)］：(.+)$/s;
+
+// Matches ［speaker］： with nothing after the colon (speaker can be empty).
+const SPEECH_EMPTY_RE = /^［.*?］：$/;
+
+// Characters that mark the end of a complete sentence.
+const SENTENCE_ENDERS = new Set(["。", "！", "？", "）", "」"]);
+
+// Matches standalone punctuation.
+const LONE_PUNCT_RE = /^[。、？！…～]+$/;
+
+/**
+ * Check whether a message looks like a new speech line or bracket.
+ */
+function isNewSpeechOrBracket(msg) {
+  return msg.startsWith("［");
+}
+
+/**
+ * Check whether a speech line's content ends with a sentence terminator.
+ */
+function hasCompleteEnding(msg) {
+  if (msg.length === 0) return false;
+  return SENTENCE_ENDERS.has(msg[msg.length - 1]);
+}
+
+/**
+ * Pre-join fragmented entries into complete messages.
+ */
+function joinFragments(entries) {
+  const messages = entries.map((e) => e.message.replace(/\r\n/g, ""));
+  const joined = [];
+
+  let i = 0;
+  while (i < messages.length) {
+    let msg = messages[i];
+
+    // Pattern 1: Lone open bracket "［" followed by "］：..."
+    if (msg === "［" && i + 1 < messages.length) {
+      msg = "［" + messages[i + 1];
+      i += 2;
+      joined.push(msg);
+      continue;
+    }
+
+    // Pattern 2: Speech with empty content "［speaker］：" followed by continuation.
+    if (SPEECH_EMPTY_RE.test(msg) && i + 1 < messages.length) {
+      msg = msg + messages[i + 1];
+      i += 2;
+      // After joining, the next entry might be lone punctuation — handle below.
+    } else {
+      i++;
+    }
+
+    // Pattern 3: Lone punctuation — append to the last joined message.
+    if (LONE_PUNCT_RE.test(msg) && joined.length > 0) {
+      joined[joined.length - 1] += msg;
+      continue;
+    }
+
+    joined.push(msg);
+
+    // Pattern 4: Incomplete speech + plain continuation.
+    // If this is a speech line whose content doesn't end with a sentence
+    // terminator, keep absorbing the next non-speech entries.
+    const speechMatch = joined[joined.length - 1].match(SPEECH_RE);
+    if (speechMatch) {
+      while (!hasCompleteEnding(joined[joined.length - 1]) && i < messages.length) {
+        const next = messages[i];
+        // Stop if the next entry starts a new speech/bracket.
+        if (isNewSpeechOrBracket(next)) break;
+        // Absorb lone punctuation or plain continuation.
+        joined[joined.length - 1] += next;
+        i++;
+      }
+    }
+  }
+
+  return joined;
+}
 
 async function main() {
   // Step 1: Discover all JSON files in the input directory.
@@ -51,11 +139,12 @@ async function main() {
     const raw = await readFile(filePath, "utf-8");
     const entries = JSON.parse(raw);
 
-    // Step 3: Convert each JSON entry to text lines.
+    // Step 3: Join fragmented entries into complete messages.
+    const messages = joinFragments(entries);
+
+    // Step 4: Convert each joined message to output lines.
     const lines = [];
-    for (const entry of entries) {
-      // Strip \r\n sequences from the message before processing.
-      const msg = entry.message.replace(/\r\n/g, "");
+    for (const msg of messages) {
       const m = msg.match(SPEECH_RE);
       if (m) {
         // Speech entry — emit ＃{source} then the content.
@@ -72,11 +161,11 @@ async function main() {
       }
     }
 
-    // Step 4: Build the section with a filename header.
+    // Step 5: Build the section with a filename header.
     sections.push(`${fileName}\n${HEADER_SEPARATOR}\n${lines.join("\n")}`);
   }
 
-  // Step 5: Prepend each section with a separator and write to disk.
+  // Step 6: Prepend each section with a separator and write to disk.
   const output = sections.map((s) => `${SECTION_SEPARATOR}\n${s}`).join("\n");
   await writeFile(OUTPUT_FILE, output + "\n", "utf-8");
 

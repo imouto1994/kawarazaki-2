@@ -40,7 +40,7 @@ const OUTPUT_FILE = "merged-original.txt";
 const SECTION_SEPARATOR = "--------------------";
 const HEADER_SEPARATOR = "********************";
 
-const MAX_CHUNK_LINES = 1200;
+const MAX_CHUNK_LINES = 900;
 const CHUNKS_DIR = "original-merged-chunks";
 
 // Matches ［speaker］：content where speaker can be empty (anonymous protagonist).

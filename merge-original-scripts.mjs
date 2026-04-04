@@ -111,7 +111,10 @@ function joinFragments(entries) {
     // terminator, keep absorbing the next non-speech entries.
     const speechMatch = joined[joined.length - 1].match(SPEECH_RE);
     if (speechMatch) {
-      while (!hasCompleteEnding(joined[joined.length - 1]) && i < messages.length) {
+      while (
+        !hasCompleteEnding(joined[joined.length - 1]) &&
+        i < messages.length
+      ) {
         const next = messages[i];
         // Stop if the next entry starts a new speech/bracket.
         if (isNewSpeechOrBracket(next)) break;
@@ -152,11 +155,10 @@ async function main() {
       if (m) {
         // Speech entry — emit ＃{source} then the content.
         // Thoughts already have （）; dialogue gets wrapped in 「」.
-        const source = m[1];
+        const source = m[1] || "会員１号";
         const content = m[2];
         lines.push(`＃${source}`);
-        const isThought =
-          content.startsWith("（") && content.endsWith("）");
+        const isThought = content.startsWith("（") && content.endsWith("）");
         lines.push(isThought ? content : `「${content}」`);
       } else {
         // Narration — emit as-is.
@@ -188,7 +190,10 @@ async function main() {
 
     // If adding this section exceeds the limit and we already have content,
     // flush the current chunk first.
-    if (currentLineCount + sectionLineCount > MAX_CHUNK_LINES && currentChunk.length > 0) {
+    if (
+      currentLineCount + sectionLineCount > MAX_CHUNK_LINES &&
+      currentChunk.length > 0
+    ) {
       chunks.push(currentChunk);
       currentChunk = [];
       currentLineCount = 0;
